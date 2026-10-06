@@ -10,11 +10,12 @@ import { siteConfig } from "@/config/site";
 import { db, isUniqueViolation, type Prisma } from "@/server/db";
 import type { PaymentStatus as DbPaymentStatus } from "@/generated/prisma/client";
 import { env } from "@/server/env";
-import { getPaymentProvider } from "@/server/payments/registry";
+import { CRYPTOMUS_ID, loadCryptomusConfig } from "@/server/payments/cryptomus/config";
+import { findPaymentProvider, listPaymentProviders } from "@/server/payments/registry";
 import { PaymentProviderError, type PaymentProvider, type ProviderPaymentState } from "@/server/payments/types";
-import type { Page, PaymentListItem, PaymentStatus, TopUpOptions } from "@/types/account";
+import type { Page, PaymentListItem, PaymentStatus, TopUpOptions, TopUpProviderOption } from "@/types/account";
 import { platformCurrency } from "./currency";
-import { getSetting, whatsappDigits } from "./settings.service";
+import { CRYPTOMUS_DEFAULT_DESCRIPTION, CRYPTOMUS_DEFAULT_NAME, getSetting, whatsappDigits } from "./settings.service";
 import { applyInTx } from "./wallet.service";
 
 /**
@@ -76,26 +77,65 @@ export function topUpFee(amount: number): number {
   return topUpFeeFor(amount, feeBps, feeFixed);
 }
 
-export async function getTopUpOptions(): Promise<TopUpOptions> {
-  const provider = getPaymentProvider();
-  const l = limits();
-  const methods = provider?.methods() ?? [];
-  const manual = provider?.flow === "manual";
-  const details = manual ? await getSetting("manual_payment") : null;
+type Limits = ReturnType<typeof limits>;
+
+/** Limits and fees of one provider: Cryptomus has its own (admin settings); others use the TOPUP_* environment. */
+async function limitsFor(provider: PaymentProvider): Promise<Limits> {
+  if (provider.id !== CRYPTOMUS_ID) return limits();
+  const c = await loadCryptomusConfig();
   return {
-    available: methods.length > 0,
-    flow: manual ? "manual" : "redirect",
-    manual: details
-      ? { accountName: details.accountName, accountNumber: details.accountNumber, whatsapp: details.whatsapp, whatsappDigits: whatsappDigits(details.whatsapp), note: details.note }
-      : null,
-    test: provider ? !provider.live : false,
+    min: toMinor(c.minAmount),
+    max: toMinor(c.maxAmount),
+    feeBps: toMinor(c.feePercent) / 100,
+    feeFixed: toMinor(c.feeFixed),
+    feePercent: c.feePercent,
+    currency: platformCurrency().code,
+  };
+}
+
+async function providerOption(provider: PaymentProvider): Promise<TopUpProviderOption> {
+  const l = await limitsFor(provider);
+  const methods = provider.methods();
+  // Admin-customised Cryptomus wording; null keeps the translated defaults.
+  const custom = provider.id === CRYPTOMUS_ID ? await loadCryptomusConfig() : null;
+  return {
+    id: provider.id,
+    flow: provider.flow,
+    label: custom && custom.displayName !== CRYPTOMUS_DEFAULT_NAME ? custom.displayName : null,
+    description: custom && custom.description && custom.description !== CRYPTOMUS_DEFAULT_DESCRIPTION ? custom.description : null,
+    test: !provider.live,
     currency: l.currency,
     min: l.min,
     max: l.max,
-    feePercent: l.feePercent,
-    feeFixed: l.feeFixed,
+    feePercent: provider.flow === "manual" ? "0" : l.feePercent,
+    feeFixed: provider.flow === "manual" ? 0 : l.feeFixed,
     presets: PRESETS.filter((p) => p >= l.min && p <= l.max),
     methods: methods.map(({ id, label, description, kind }) => ({ id, label, description, kind })),
+  };
+}
+
+export async function getTopUpOptions(): Promise<TopUpOptions> {
+  const providers = await Promise.all((await listPaymentProviders()).map(providerOption));
+  const hasManual = providers.some((p) => p.flow === "manual");
+  const details = hasManual ? await getSetting("manual_payment") : null;
+  const first = providers[0];
+  const l = limits();
+  return {
+    available: providers.some((p) => p.methods.length > 0),
+    providers,
+    // The fields below describe the first provider (kept for API clients written before several providers existed).
+    flow: first?.flow ?? "redirect",
+    manual: details
+      ? { accountName: details.accountName, accountNumber: details.accountNumber, whatsapp: details.whatsapp, whatsappDigits: whatsappDigits(details.whatsapp), note: details.note }
+      : null,
+    test: first?.test ?? false,
+    currency: first?.currency ?? l.currency,
+    min: first?.min ?? l.min,
+    max: first?.max ?? l.max,
+    feePercent: first?.feePercent ?? l.feePercent,
+    feeFixed: first?.feeFixed ?? l.feeFixed,
+    presets: first?.presets ?? [],
+    methods: providers.flatMap((p) => p.methods),
   };
 }
 
@@ -103,16 +143,14 @@ export async function getTopUpOptions(): Promise<TopUpOptions> {
 
 type PaymentRow = Prisma.PaymentGetPayload<object>;
 
-function methodLabel(provider: PaymentProvider | null, row: PaymentRow): string {
-  if (provider?.id === row.provider) {
-    const m = provider.methods().find((x) => x.id === row.method);
-    if (m) return m.label;
-  }
-  return row.method.replace(/_/g, " ");
+const METHOD_LABELS: Record<string, string> = { easypaisa: "Easypaisa", jazzcash: "JazzCash" };
+
+function methodLabel(row: PaymentRow): string {
+  if (row.provider === CRYPTOMUS_ID) return "Crypto · Cryptomus";
+  return METHOD_LABELS[row.method] ?? row.method.replace(/_/g, " ");
 }
 
 export function toPaymentItem(row: PaymentRow): PaymentListItem {
-  const provider = getPaymentProvider();
   const payable = row.status === "PENDING" && row.checkoutUrl !== null && (!row.expiresAt || row.expiresAt.getTime() > Date.now());
   return {
     id: row.id,
@@ -122,7 +160,8 @@ export function toPaymentItem(row: PaymentRow): PaymentListItem {
     total: toMinor(row.total),
     currency: row.currency,
     method: row.method,
-    methodLabel: methodLabel(provider, row),
+    methodLabel: methodLabel(row),
+    provider: row.provider,
     status: row.status.toLowerCase() as PaymentStatus,
     createdAt: row.createdAt.toISOString(),
     paidAt: row.paidAt?.toISOString() ?? null,
@@ -151,7 +190,7 @@ function newReference(): string {
 
 export async function createTopUp(
   userId: string,
-  input: { amount: string; method: string; idempotencyKey: string },
+  input: { amount: string; method: string; idempotencyKey: string; provider?: string },
 ): Promise<TopUpResult> {
   // A resubmitted form returns the payment it already created.
   const existing = await db().payment.findUnique({ where: { userId_idempotencyKey: { userId, idempotencyKey: input.idempotencyKey } } });
@@ -162,14 +201,16 @@ export async function createTopUp(
     return { ok: false, code: "UNAVAILABLE", message: maintenance.message || "We're doing maintenance. Top-ups are paused for a short while." };
   }
 
-  const provider = getPaymentProvider();
-  if (!provider) return { ok: false, code: "UNAVAILABLE", message: "Adding funds isn't available yet. Please check back soon." };
-  if (provider.flow === "manual") return { ok: false, code: "INVALID", message: "Submit a manual top-up request instead." };
-  if (!provider.methods().some((m) => m.id === input.method)) {
+  const providers = await listPaymentProviders();
+  if (!providers.length) return { ok: false, code: "UNAVAILABLE", message: "Adding funds isn't available yet. Please check back soon." };
+  // Only enabled providers can start new payments (a disabled Cryptomus still settles old ones elsewhere).
+  const provider = providers.find((p) => p.flow === "redirect" && (!input.provider || p.id === input.provider) && p.methods().some((m) => m.id === input.method));
+  if (!provider) {
+    if (providers.every((p) => p.flow === "manual")) return { ok: false, code: "INVALID", message: "Submit a manual top-up request instead." };
     return { ok: false, code: "INVALID", message: "Choose a payment method." };
   }
 
-  const l = limits();
+  const l = await limitsFor(provider);
   const amount = parseAmount(input.amount.trim().replace(",", "."));
   if (amount === null || amount % CENT !== 0) {
     return { ok: false, code: "INVALID", message: "Enter an amount like 10 or 12.50." };
@@ -187,9 +228,10 @@ export async function createTopUp(
     return { ok: false, code: "TOO_MANY_PENDING", message: "You have several unfinished payments. Complete or wait for them before starting another." };
   }
 
-  const fee = topUpFee(amount);
+  const fee = topUpFeeFor(amount, l.feeBps, l.feeFixed);
   const total = amount + fee;
-  const expiresAt = new Date(Date.now() + env().PAYMENT_EXPIRY_MINUTES * 60_000);
+  const lifetimeMinutes = provider.id === CRYPTOMUS_ID ? (await loadCryptomusConfig()).lifetimeMinutes : env().PAYMENT_EXPIRY_MINUTES;
+  const expiresAt = new Date(Date.now() + lifetimeMinutes * 60_000);
 
   let payment: PaymentRow;
   try {
@@ -233,13 +275,15 @@ export async function createTopUp(
     });
   } catch (error) {
     const code = error instanceof PaymentProviderError ? error.code : "INTERNAL";
+    // Safe diagnostic for staff (provider message / field names — never credentials).
+    const detail = (error instanceof PaymentProviderError ? error.message : "internal error").slice(0, 200);
     if (error instanceof PaymentProviderError && error.ambiguous) {
       // The provider may have created it; reconciliation looks it up by reference.
-      await db().payment.update({ where: { id: payment.id }, data: { failureReason: "CREATE_UNCONFIRMED" } });
+      await db().payment.update({ where: { id: payment.id }, data: { failureReason: "CREATE_UNCONFIRMED", metadata: { createError: detail } } });
     } else {
-      await db().payment.update({ where: { id: payment.id }, data: { status: "FAILED", failedAt: new Date(), failureReason: code } });
+      await db().payment.update({ where: { id: payment.id }, data: { status: "FAILED", failedAt: new Date(), failureReason: code, metadata: { createError: detail } } });
     }
-    log("create_failed", { paymentId: payment.id, provider: provider.id, code });
+    log("create_failed", { paymentId: payment.id, provider: provider.id, code, detail });
     return { ok: false, code: "PROVIDER_ERROR", message: "We couldn't start the payment. You have not been charged — please try again." };
   }
 
@@ -279,6 +323,12 @@ export async function settle(paymentId: string, state: ProviderPaymentState): Pr
       return;
     }
 
+    // Keep the provider's latest non-secret details (status, network, tx hash, paid amount…) for staff.
+    if (state.details) {
+      const meta = (p.metadata && typeof p.metadata === "object" && !Array.isArray(p.metadata) ? p.metadata : {}) as Record<string, unknown>;
+      await tx.payment.update({ where: { id: p.id }, data: { metadata: { ...meta, provider: { ...state.details, checkedAt: now.toISOString() } } as Prisma.InputJsonValue } });
+    }
+
     switch (state.status) {
       case "paid": {
         if (p.status === "PAID" || p.status === "REFUNDED") return; // already processed
@@ -293,17 +343,39 @@ export async function settle(paymentId: string, state: ProviderPaymentState): Pr
             amount: toMinor(p.amount),
             type: "DEPOSIT",
             reference: `payment:${p.id}:credit`,
-            description: `Top-up · ${p.reference}`,
+            description: p.provider === CRYPTOMUS_ID ? `Top-up · Cryptomus · ${p.reference}` : `Top-up · ${p.reference}`,
             paymentId: p.id,
+            metadata: {
+              provider: p.provider,
+              providerPaymentId: state.providerPaymentId,
+              orderId: p.reference,
+              fee: toDecimalString(toMinor(p.fee)),
+              ...(state.details?.txid ? { txid: String(state.details.txid) } : {}),
+              ...(state.details?.network ? { network: String(state.details.network) } : {}),
+            },
           },
           1,
         );
         await tx.payment.update({
           where: { id: p.id },
-          data: { status: "PAID", paidAt: now, providerPaymentId: state.providerPaymentId, failureReason: null },
+          data: {
+            status: "PAID",
+            paidAt: now,
+            providerPaymentId: state.providerPaymentId,
+            // Paid more than the invoice: the invoice amount is credited; staff decide about the difference.
+            ...(state.overpaid ? { needsReview: true, failureReason: "OVERPAID" } : { failureReason: null }),
+          },
         });
+        if (state.overpaid) log("overpaid", { paymentId: p.id });
         return;
       }
+      case "underpaid":
+        // Final: the customer paid less than required. Never credited automatically.
+        if (OPEN.includes(p.status) || UNPAID_CLOSED.includes(p.status)) {
+          await tx.payment.update({ where: { id: p.id }, data: { status: "UNDERPAID", failedAt: now, needsReview: true, failureReason: "UNDERPAID" } });
+          log("underpaid", { paymentId: p.id }, "error");
+        }
+        return;
       case "processing":
         if (p.status === "PENDING") await tx.payment.update({ where: { id: p.id }, data: { status: "PROCESSING" } });
         return;
@@ -340,8 +412,9 @@ async function syncWithProvider(paymentId: string, opts: { force?: boolean; noti
   if (!p || p.status === "REFUNDED" || p.status === "REJECTED" || (p.status === "PAID" && !opts.notified)) return true;
   // Manual top-ups have no remote status: an administrator's review decides.
   if (p.provider === "manual") return true;
-  const provider = getPaymentProvider();
-  if (!provider || provider.id !== p.provider) return true;
+  // Also when the provider was disabled since: payments created earlier must still settle.
+  const provider = await findPaymentProvider(p.provider);
+  if (!provider) return true;
   const now = Date.now();
   if (!opts.force && p.lastCheckedAt && now - p.lastCheckedAt.getTime() < CHECK_INTERVAL_MS) return true;
   await db().payment.update({ where: { id: p.id }, data: { lastCheckedAt: new Date(now) } });
@@ -404,7 +477,7 @@ const FILTER: Record<"all" | "pending" | "paid" | "unpaid", DbPaymentStatus[] | 
   all: null,
   pending: OPEN,
   paid: ["PAID"],
-  unpaid: ["FAILED", "CANCELLED", "EXPIRED", "REFUNDED", "REJECTED"],
+  unpaid: ["FAILED", "CANCELLED", "EXPIRED", "REFUNDED", "REJECTED", "UNDERPAID"],
 };
 
 export async function listTopUps(
@@ -442,8 +515,9 @@ export type WebhookOutcome = { status: number; body: { received: boolean; duplic
  * the state itself is fetched from the provider before anything is credited.
  */
 export async function handlePaymentWebhook(providerId: string, rawBody: string, headers: Headers): Promise<WebhookOutcome> {
-  const provider = getPaymentProvider();
-  if (!provider || provider.id !== providerId) return { status: 404, body: { received: false, error: "unknown_provider" } };
+  // A provider an admin has disabled still receives notifications for its existing payments.
+  const provider = await findPaymentProvider(providerId);
+  if (!provider) return { status: 404, body: { received: false, error: "unknown_provider" } };
 
   let event;
   try {
@@ -451,6 +525,10 @@ export async function handlePaymentWebhook(providerId: string, rawBody: string, 
   } catch (error) {
     const code = error instanceof PaymentProviderError ? error.code : "INVALID_PAYLOAD";
     log("webhook_rejected", { provider: provider.id, code });
+    // Unverified content is never stored — only the fact and the reason.
+    await db()
+      .systemLog.create({ data: { level: "WARN", source: "payments", message: "webhook_rejected", context: { provider: provider.id, reason: code } } })
+      .catch(() => {});
     return code === "INVALID_SIGNATURE"
       ? { status: 401, body: { received: false, error: "invalid_signature" } }
       : { status: 400, body: { received: false, error: "invalid_payload" } };
@@ -479,10 +557,29 @@ export async function handlePaymentWebhook(providerId: string, rawBody: string, 
 
   if (!payment) {
     log("webhook_unknown_payment", { provider: provider.id, eventId: event.eventId });
-  } else if (!(await syncWithProvider(payment.id, { force: true, notified: true }))) {
+    await db().paymentEvent.update({ where: { id: record.id }, data: { processedAt: new Date(), result: "unknown_payment", error: "No payment with this order ID / invoice." } });
+    return { status: 200, body: { received: true } };
+  }
+  let synced: boolean;
+  try {
+    synced = await syncWithProvider(payment.id, { force: true, notified: true });
+  } catch (error) {
+    await db().paymentEvent.update({ where: { id: record.id }, data: { result: "error", error: (error instanceof Error ? error.message : "error").slice(0, 255) } });
+    throw error;
+  }
+  if (!synced) {
+    await db().paymentEvent.update({ where: { id: record.id }, data: { result: "retry", error: "Provider unreachable while confirming the payment." } });
     return { status: 503, body: { received: false, error: "retry_later" } }; // provider will redeliver
   }
-  await db().paymentEvent.update({ where: { id: record.id }, data: { processedAt: new Date() } });
+  const after = await db().payment.findUniqueOrThrow({ where: { id: payment.id }, select: { status: true, needsReview: true, failureReason: true } });
+  await db().paymentEvent.update({
+    where: { id: record.id },
+    data: {
+      processedAt: new Date(),
+      result: `payment_${after.status.toLowerCase()}`.slice(0, 32),
+      error: after.needsReview ? (after.failureReason ?? "needs review").slice(0, 255) : null,
+    },
+  });
   return { status: 200, body: { received: true } };
 }
 
@@ -555,8 +652,8 @@ export async function createManualTopUp(
   if (maintenance.enabled) {
     return { ok: false, code: "UNAVAILABLE", message: maintenance.message || "We're doing maintenance. Top-ups are paused for a short while." };
   }
-  const provider = getPaymentProvider();
-  if (!provider || provider.flow !== "manual") return { ok: false, code: "UNAVAILABLE", message: "Manual top-ups aren't available right now." };
+  const provider = (await listPaymentProviders()).find((p) => p.flow === "manual");
+  if (!provider) return { ok: false, code: "UNAVAILABLE", message: "Manual top-ups aren't available right now." };
   if (!provider.methods().some((m) => m.id === input.method)) return { ok: false, code: "INVALID", message: "Choose Easypaisa or JazzCash." };
 
   const l = limits();

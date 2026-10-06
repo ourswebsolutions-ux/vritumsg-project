@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { getAdminActor, type AdminActor } from "@/server/admin/guard";
-import { adminCancelOrder, adminRecheckPayment, adminRefreshOrder, resolvePaymentReview } from "@/server/admin/orders";
+import { adminCancelOrder, adminRecheckPayment, adminRefreshOrder, adminResendPaymentWebhook, resolvePaymentReview } from "@/server/admin/orders";
 import {
   saveMaintenance,
   savePricing,
@@ -38,6 +38,7 @@ import {
 } from "@/server/admin/users";
 import { hitRateLimit, RATE_LIMITS } from "@/server/auth/rate-limit";
 import type { FormState } from "@/types/forms";
+import { saveCryptomusSettings, testCryptomusConnection } from "@/server/admin/payment-settings";
 
 /**
  * Admin mutations. Each one re-verifies the admin from the session (the role
@@ -164,6 +165,12 @@ export async function adminRecheckPaymentAction(_prev: FormState, data: FormData
   return run((a) => adminRecheckPayment(a, id.data));
 }
 
+export async function adminResendWebhookAction(_prev: FormState, data: FormData): Promise<FormState> {
+  const id = uuid.safeParse(field(data, "paymentId"));
+  if (!id.success) return INVALID;
+  return run((a) => adminResendPaymentWebhook(a, id.data));
+}
+
 export async function adminResolveReviewAction(_prev: FormState, data: FormData): Promise<FormState> {
   const id = uuid.safeParse(field(data, "paymentId"));
   if (!id.success) return INVALID;
@@ -220,6 +227,38 @@ export async function adminSaveCurrencyMarkupAction(_prev: FormState, data: Form
   // Every page shows converted prices: refresh them all, not only the admin panel.
   if (result.status === "success") revalidatePath("/", "layout");
   return result;
+}
+
+const secret = (data: FormData, name: string) => ({ value: field(data, name).slice(0, 600), clear: data.get(`${name}Clear`) === "on" });
+
+/** Cryptomus settings. Credential fields are write-only: blank keeps the saved value. */
+export async function adminSaveCryptomusAction(_prev: FormState, data: FormData): Promise<FormState> {
+  const result = await run((a) =>
+    saveCryptomusSettings(a, {
+      enabled: data.get("enabled") === "on",
+      merchantId: secret(data, "merchantId"),
+      paymentKey: secret(data, "paymentKey"),
+      payoutKey: secret(data, "payoutKey"),
+      displayName: field(data, "displayName").slice(0, 80),
+      description: field(data, "description").slice(0, 300),
+      minAmount: field(data, "minAmount").slice(0, 20),
+      maxAmount: field(data, "maxAmount").slice(0, 20),
+      feeFixed: field(data, "feeFixed").slice(0, 20),
+      feePercent: field(data, "feePercent").slice(0, 20),
+      sortOrder: field(data, "sortOrder").slice(0, 5),
+      webhookUrl: field(data, "webhookUrl").slice(0, 300),
+      verifyIp: data.get("verifyIp") === "on",
+      lifetimeMinutes: field(data, "lifetimeMinutes").slice(0, 5),
+    }),
+  );
+  // The add-funds page lists the enabled providers.
+  if (result.status === "success") revalidatePath("/profile/top-up");
+  return result;
+}
+
+/** Tests the typed (or saved) Merchant UUID + Payment API key with a read-only signed request. */
+export async function adminTestCryptomusAction(_prev: FormState, data: FormData): Promise<FormState> {
+  return run((a) => testCryptomusConnection(a, { merchantId: field(data, "merchantId").slice(0, 600), paymentKey: field(data, "paymentKey").slice(0, 600) }));
 }
 
 /* ------------------------------------------------------- manual top-ups -- */

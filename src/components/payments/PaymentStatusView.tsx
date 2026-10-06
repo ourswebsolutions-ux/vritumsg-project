@@ -73,6 +73,12 @@ const VIEW: Record<PaymentListItem["status"], { icon: IconName; tone: string; ti
     title: "psv.rejected.title",
     body: "psv.rejected.body",
   },
+  underpaid: {
+    icon: "alert",
+    tone: "bg-warning/15 text-[#a37c00] dark:text-warning",
+    title: "psv.underpaid.title",
+    body: "psv.underpaid.body",
+  },
 };
 
 /** Manual (admin-verified) requests: accurate wording, no gateway language. */

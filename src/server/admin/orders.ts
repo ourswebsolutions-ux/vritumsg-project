@@ -2,6 +2,10 @@ import "server-only";
 import { toMinor } from "@/lib/money";
 import { db, type Prisma } from "@/server/db";
 import { cancelOrder, getOrderDetail, refreshOrder } from "@/server/services/order.service";
+import { CRYPTOMUS_ID } from "@/server/payments/cryptomus/config";
+import { CryptomusPaymentProvider } from "@/server/payments/cryptomus/provider";
+import { findPaymentProvider } from "@/server/payments/registry";
+import { PaymentProviderError } from "@/server/payments/types";
 import { recheckPayment } from "@/server/services/payment.service";
 import type { OrderStatus, PaymentStatus, TransactionType } from "@/types/account";
 import type { AdminLedgerRow, AdminOrderRow, AdminPage, AdminPaymentRow } from "@/types/admin";
@@ -15,7 +19,7 @@ import { serviceLogo } from "@/lib/service-logos";
 type DateRange = { from?: Date; to?: Date };
 const createdIn = (r: DateRange) => (r.from || r.to ? { createdAt: { ...(r.from ? { gte: r.from } : {}), ...(r.to ? { lte: r.to } : {}) } } : {});
 const ORDER_STATUSES = ["PENDING", "ACTIVE", "SMS_RECEIVED", "COMPLETED", "CANCELLED", "REFUNDED", "FAILED", "EXPIRED"] as const;
-const PAYMENT_STATUSES = ["PENDING", "PROCESSING", "PAID", "FAILED", "CANCELLED", "EXPIRED", "REFUNDED"] as const;
+const PAYMENT_STATUSES = ["PENDING", "PROCESSING", "PAID", "FAILED", "CANCELLED", "EXPIRED", "REFUNDED", "REJECTED", "UNDERPAID"] as const;
 
 const ledgerRow = (t: { id: string; type: string; amount: Prisma.Decimal; balanceAfter: Prisma.Decimal; description: string | null; createdAt: Date }): AdminLedgerRow => ({
   id: t.id,
@@ -246,9 +250,18 @@ export async function getAdminPayment(paymentId: string) {
   if (!row) return null;
   const [ledger, events] = await Promise.all([
     db().transaction.findMany({ where: { paymentId }, orderBy: { createdAt: "asc" } }),
-    db().paymentEvent.findMany({ where: { paymentId }, orderBy: { createdAt: "desc" }, take: 30, select: { id: true, eventId: true, type: true, processedAt: true, createdAt: true } }),
+    db().paymentEvent.findMany({ where: { paymentId }, orderBy: { createdAt: "desc" }, take: 30, select: { id: true, eventId: true, type: true, processedAt: true, result: true, error: true, createdAt: true } }),
   ]);
-  const meta = row.metadata as { review?: { by: string; at: string; note: string }; note?: string } | null;
+  const meta = row.metadata as {
+    review?: { by: string; at: string; note: string };
+    note?: string;
+    provider?: Record<string, unknown>;
+    createError?: unknown;
+  } | null;
+  // Provider-reported details (network, TXID, coin amount, …) recorded on settlement: plain values only.
+  const providerDetails = Object.entries(meta?.provider ?? {})
+    .filter((e): e is [string, string | number | boolean] => ["string", "number", "boolean"].includes(typeof e[1]))
+    .map(([k, v]) => [k, String(v)] as [string, string]);
   const review = meta?.review ?? null;
   const reviewer = row.reviewedById ? await db().user.findUnique({ where: { id: row.reviewedById }, select: { email: true } }) : null;
   return {
@@ -256,6 +269,8 @@ export async function getAdminPayment(paymentId: string) {
     expiresAt: row.expiresAt?.toISOString() ?? null,
     review,
     customerNote: meta?.note ?? null,
+    providerDetails,
+    createError: typeof meta?.createError === "string" ? meta.createError : null,
     manualReview: row.reviewedAt ? { by: reviewer?.email ?? "—", at: row.reviewedAt.toISOString(), rejectionReason: row.rejectionReason } : null,
     ledger: ledger.map(ledgerRow),
     events: events.map((e) => ({ ...e, processedAt: e.processedAt?.toISOString() ?? null, createdAt: e.createdAt.toISOString() })),
@@ -277,6 +292,80 @@ export async function adminRecheckPayment(actor: AdminActor, paymentId: string):
   );
   if (!reached) return { ok: false, message: "The payment provider couldn't be reached." };
   return { ok: true, message: after.status === before.status ? `Provider confirms: ${after.status.toLowerCase()}.` : `Status changed to ${after.status.toLowerCase()}.` };
+}
+
+/**
+ * Asks Cryptomus to send the payment notification again (allowed for
+ * paid / paid_over / wrong_amount invoices). The webhook that follows is
+ * verified and processed like any other, so it can never credit twice.
+ */
+export async function adminResendPaymentWebhook(actor: AdminActor, paymentId: string): Promise<AdminResult> {
+  const p = await db().payment.findUnique({ where: { id: paymentId }, select: { provider: true, providerPaymentId: true, reference: true } });
+  if (!p) return { ok: false, message: "Payment not found." };
+  if (p.provider !== CRYPTOMUS_ID) return { ok: false, message: "Only Cryptomus payments support webhook resend." };
+  if (!p.providerPaymentId) return { ok: false, message: "This payment has no Cryptomus invoice." };
+  const provider = await findPaymentProvider(p.provider);
+  if (!(provider instanceof CryptomusPaymentProvider)) return { ok: false, message: "Cryptomus isn't configured." };
+  let ok = true;
+  let message = "Cryptomus will resend the notification shortly.";
+  try {
+    await provider.resendWebhook(p.providerPaymentId);
+  } catch (error) {
+    ok = false;
+    message = error instanceof PaymentProviderError ? `Cryptomus refused the resend: ${error.message}` : "Cryptomus couldn't be reached.";
+  }
+  await audit(actor, "payment.webhook_resend", { type: "payment", id: paymentId }, ok, { reference: p.reference }, ok ? `Requested Cryptomus webhook resend for ${p.reference}` : `Cryptomus webhook resend failed for ${p.reference}`);
+  return { ok, message };
+}
+
+export type AdminPaymentEventRow = {
+  id: string;
+  provider: string;
+  eventId: string;
+  type: string;
+  result: string | null;
+  error: string | null;
+  processedAt: string | null;
+  createdAt: string;
+  payment: { id: string; reference: string } | null;
+};
+
+/** Every received webhook (verified ones; rejected ones are in the system log). */
+export async function listPaymentEvents(filter: { provider?: string; q?: string; problems?: boolean; page?: number; pageSize?: number } = {}): Promise<AdminPage<AdminPaymentEventRow>> {
+  const page = Math.max(1, filter.page ?? 1);
+  const pageSize = Math.min(100, Math.max(1, filter.pageSize ?? 50));
+  const q = filter.q?.trim();
+  const where: Prisma.PaymentEventWhereInput = {
+    ...(filter.provider ? { provider: filter.provider } : {}),
+    ...(filter.problems ? { OR: [{ processedAt: null }, { error: { not: null } }] } : {}),
+    ...(q ? { AND: [{ OR: [{ eventId: { startsWith: q } }, { payment: { reference: { startsWith: q.toUpperCase() } } }] }] } : {}),
+  };
+  const [rows, total] = await Promise.all([
+    db().paymentEvent.findMany({
+      where,
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      include: { payment: { select: { id: true, reference: true } } },
+    }),
+    db().paymentEvent.count({ where }),
+  ]);
+  return {
+    items: rows.map((e) => ({
+      id: e.id,
+      provider: e.provider,
+      eventId: e.eventId,
+      type: e.type,
+      result: e.result,
+      error: e.error,
+      processedAt: e.processedAt?.toISOString() ?? null,
+      createdAt: e.createdAt.toISOString(),
+      payment: e.payment,
+    })),
+    total,
+    page,
+    pageSize,
+  };
 }
 
 /**

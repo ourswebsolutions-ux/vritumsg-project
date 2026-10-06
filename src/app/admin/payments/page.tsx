@@ -14,10 +14,20 @@ import { resolveDateRange } from "@/lib/date-range";
 import { formatPrice, formatShortDateTime } from "@/lib/format";
 import { requireAdminPage } from "@/server/admin/guard";
 import { listAdminPayments } from "@/server/admin/orders";
+import { ProviderBadge } from "@/components/admin/ProviderBadge";
 
 export const metadata: Metadata = { title: "Payments" };
 
-const STATUSES = ["pending", "processing", "paid", "failed", "cancelled", "expired", "refunded"];
+const STATUSES = ["pending", "processing", "paid", "underpaid", "failed", "cancelled", "expired", "refunded", "rejected"];
+const PROVIDERS = [
+  { value: "manual", label: "Manual (Easypaisa / JazzCash)" },
+  { value: "cryptomus", label: "Cryptomus" },
+];
+const METHODS = [
+  { value: "easypaisa", label: "Easypaisa" },
+  { value: "jazzcash", label: "JazzCash" },
+  { value: "crypto", label: "Crypto" },
+];
 
 export default async function AdminPaymentsPage({ searchParams }: PageProps<"/admin/payments">) {
   await requireAdminPage("/admin/payments");
@@ -25,22 +35,24 @@ export default async function AdminPaymentsPage({ searchParams }: PageProps<"/ad
   const q = one(sp.q);
   const status = STATUSES.find((s) => s === one(sp.status));
   const review = one(sp.review) === "1";
-  const method = (["easypaisa", "jazzcash"] as const).find((m) => m === one(sp.method));
+  const method = METHODS.find((m) => m.value === one(sp.method))?.value;
+  const provider = PROVIDERS.find((p) => p.value === one(sp.provider))?.value;
   const userId = /^[0-9a-f-]{36}$/.test(one(sp.userId) ?? "") ? one(sp.userId) : undefined;
   const range = resolveDateRange({ from: one(sp.from, 10), to: one(sp.to, 10) });
-  const data = await listAdminPayments({ q, status, review, method, userId, from: range.from, to: range.to, page: pageParam(sp.page) });
+  const data = await listAdminPayments({ q, status, review, method, provider, userId, from: range.from, to: range.to, page: pageParam(sp.page) });
 
   return (
     <Card>
       <PageHeader title="Payments" description={`${data.total.toLocaleString("en-US")} matching top-ups`} />
       <AdminFilters
         action="/admin/payments"
-        active={Boolean(q || status || review || method || userId || range.preset !== "all")}
+        active={Boolean(q || status || review || method || provider || userId || range.preset !== "all")}
         fields={[
           ...(userId ? [{ kind: "hidden" as const, name: "userId", value: userId }] : []),
-          { kind: "search", name: "q", placeholder: "Reference, payment ID, provider ID or user email", value: q },
+          { kind: "search", name: "q", placeholder: "Order ID, payment ID, Cryptomus UUID or user email", value: q },
           { kind: "select", name: "status", label: "Status", value: status, options: [{ value: "", label: "Any status" }, ...STATUSES.map((s) => ({ value: s, label: s }))] },
-          { kind: "select", name: "method", label: "Method", value: method, options: [{ value: "", label: "Any method" }, { value: "easypaisa", label: "Easypaisa" }, { value: "jazzcash", label: "JazzCash" }] },
+          { kind: "select", name: "provider", label: "Provider", value: provider, options: [{ value: "", label: "Any provider" }, ...PROVIDERS] },
+          { kind: "select", name: "method", label: "Method", value: method, options: [{ value: "", label: "Any method" }, ...METHODS] },
           { kind: "select", name: "review", label: "Review", value: review ? "1" : "", options: [{ value: "", label: "All" }, { value: "1", label: "Needs review" }] },
           { kind: "date", name: "from", label: "From", value: range.fromStr },
           { kind: "date", name: "to", label: "To", value: range.toStr },
@@ -62,7 +74,7 @@ export default async function AdminPaymentsPage({ searchParams }: PageProps<"/ad
             ),
           },
           { header: "User", cell: (p) => <Link href={`/admin/users/${p.user.id}`} className="block max-w-48 truncate hover:text-primary">{p.user.email}</Link> },
-          { header: "Method", desktopOnly: true, cell: (p) => `${p.provider} · ${p.method}` },
+          { header: "Provider", desktopOnly: true, cell: (p) => <ProviderBadge provider={p.provider} method={p.method} /> },
           { header: "Status", cell: (p) => <PaymentStatusBadge status={p.status} manual={p.provider === "manual"} /> },
           { header: "Amount", className: "text-end tabular-nums", cell: (p) => formatPrice(p.amount, p.currency) },
           { header: "Fee", className: "text-end tabular-nums text-fg-muted", desktopOnly: true, cell: (p) => formatPrice(p.fee, p.currency) },

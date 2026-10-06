@@ -154,7 +154,7 @@ export async function getUserDetail(userId: string): Promise<AdminUserDetail | n
     paymentCounts: {
       pending: pay(["PENDING", "PROCESSING"]),
       approved: pay(["PAID"]),
-      rejected: pay(["REJECTED", "FAILED", "CANCELLED", "EXPIRED"]),
+      rejected: pay(["REJECTED", "FAILED", "CANCELLED", "EXPIRED", "UNDERPAID"]),
       totalPaid: paid?._sum.amount ? toMinor(paid._sum.amount) : 0,
     },
     history: history.map((h) => ({

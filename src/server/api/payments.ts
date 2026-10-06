@@ -50,6 +50,8 @@ const createBody = z.object({
   /** Amount to add to the wallet, as a decimal string ("10.50") or number. */
   amount: z.union([z.string().max(20), z.number().positive().max(1e9)]).transform(String),
   method: z.string().regex(/^[a-z0-9_]{1,32}$/),
+  /** Optional provider id ("cryptomus"); see GET /api/payments/options. */
+  provider: z.string().regex(/^[a-z0-9_]{1,32}$/).optional(),
   idempotencyKey: z.string().regex(/^[A-Za-z0-9_-]{16,64}$/).optional(),
 });
 
@@ -60,7 +62,7 @@ export const postPayment = withAuth(async (req, { user }) => {
   if (!key || !/^[A-Za-z0-9_-]{16,64}$/.test(key)) {
     return apiError(400, "INVALID", "Provide an Idempotency-Key header (16–64 letters, digits, _ or -).");
   }
-  return paymentResponse(await createTopUp(user.id, { amount: body.data.amount, method: body.data.method, idempotencyKey: key }), true);
+  return paymentResponse(await createTopUp(user.id, { amount: body.data.amount, method: body.data.method, provider: body.data.provider, idempotencyKey: key }), true);
 });
 
 const idParam = z.uuid();

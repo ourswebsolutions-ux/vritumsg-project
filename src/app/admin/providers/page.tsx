@@ -87,7 +87,7 @@ export default async function AdminProvidersPage({ searchParams }: PageProps<"/a
         <PageHeader as="h2" title="Payments and email" />
         <KeyValues
           rows={[
-            ["Payment method", `${o.payments.label}${o.payments.flow === "manual" ? " — verified by administrators in Top-ups" : ""}`],
+            ["Payment methods", `${o.payments.label}${o.payments.flow === "manual" ? " — manual requests are verified by administrators in Top-ups" : ""}`],
             ["New request alerts", o.payments.adminNotifyEmail ? `Emailed to ${o.payments.adminNotifyEmail}` : "Not set (ADMIN_NOTIFY_EMAIL)"],
             ["Email delivery", o.email.mode === "smtp" ? `SMTP · ${o.email.host}` : o.email.mode === "outbox" ? "Local outbox (development)" : "Not configured"],
             ["SMTP user", o.email.user ?? "—"],

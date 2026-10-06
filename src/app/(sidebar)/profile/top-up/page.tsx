@@ -5,6 +5,7 @@ import { ManualPaymentHelp, ManualTopUpForm, PaymentAccount } from "@/components
 import { PaymentStatusBadge } from "@/components/payments/PaymentStatus";
 import { PaymentsTable } from "@/components/payments/PaymentsTable";
 import { TopUpForm } from "@/components/payments/TopUpForm";
+import { TopUpMethodChooser, type TopUpChoice } from "@/components/payments/TopUpMethodChooser";
 import { TransactionsTable } from "@/components/profile/TransactionsTable";
 import { ButtonLink } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -21,7 +22,7 @@ export async function generateMetadata(): Promise<Metadata> {
   return { title: (await getT())("nav.addFunds") };
 }
 
-export default async function TopUpPage() {
+export default async function TopUpPage({ searchParams }: PageProps<"/profile/top-up">) {
   const user = await requireUser("/profile/top-up");
   const [profile, open, recent, activity, options] = await Promise.all([
     getAccountProfile(user),
@@ -30,16 +31,96 @@ export default async function TopUpPage() {
     listTransactions(user.id, { pageSize: 5 }),
     getTopUpOptions(),
   ]);
-  const manual = options.flow === "manual" ? options.manual : null;
+  const manualOption = options.providers.find((p) => p.flow === "manual");
+  const manual = manualOption ? options.manual : null;
+  const redirects = options.providers.filter((p) => p.flow === "redirect" && p.methods.length > 0);
   const t = await getT();
   const wa = manual ? whatsappHref(manual, { email: profile.email }, t) : null;
+  const sp = await searchParams;
+  const initial = typeof sp.method === "string" ? sp.method : undefined;
+
+  const manualPanel =
+    manual && manualOption ? (
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
+        <section aria-labelledby="manual-payment" className="space-y-4">
+          <div>
+            <h2 id="manual-payment" className="text-[15px] font-semibold">
+              {t("topup.step1")}
+            </h2>
+            <p className="mt-1 text-sm text-fg-muted">{t("topup.step1Hint")}</p>
+          </div>
+          <PaymentAccount details={manual} />
+          <ul className="space-y-1.5 text-sm text-fg-muted">
+            <li className="flex gap-2">
+              <Icon name="check" size={16} className="mt-0.5 shrink-0 text-primary" /> {t("topup.keepTid")}
+            </li>
+            <li className="flex gap-2">
+              <Icon name="check" size={16} className="mt-0.5 shrink-0 text-primary" /> {t("topup.sameAmount")}
+            </li>
+            <li className="flex gap-2">
+              <Icon name="check" size={16} className="mt-0.5 shrink-0 text-primary" /> {t("topup.addedAfter")}
+            </li>
+          </ul>
+          {wa && (
+            <div className="flex flex-wrap items-center gap-3 rounded-xl border border-line p-3">
+              <span className="min-w-48 flex-1 text-sm">
+                {t("topup.needHelp")}{" "}
+                <b className="whitespace-nowrap" dir="ltr">
+                  {manual.whatsapp}
+                </b>
+              </span>
+              <ButtonLink href={wa} target="_blank" rel="noopener noreferrer" size="sm" className="!bg-[#25d366] hover:!bg-[#1ebe5a]">
+                <Icon name="message" size={16} /> {t("wa.contact")}
+              </ButtonLink>
+            </div>
+          )}
+          {manual.note && <p className="text-sm text-fg-muted">{manual.note}</p>}
+        </section>
+        <section aria-labelledby="manual-request">
+          <h2 id="manual-request" className="mb-3 text-[15px] font-semibold">
+            {t("topup.step2")}
+          </h2>
+          <ManualTopUpForm options={{ ...options, ...manualOption }} balance={profile.balance} />
+        </section>
+      </div>
+    ) : null;
+
+  const choices: TopUpChoice[] = [
+    ...(manualPanel
+      ? [
+          {
+            id: "manual",
+            icon: "phone" as const,
+            title: t("topup.manualTitle"),
+            subtitle: t("topup.manualSub"),
+            description: t("topup.manualDesc"),
+            badge: t("topup.manualBadge"),
+            badgeTone: "accent" as const,
+            panel: manualPanel,
+          },
+        ]
+      : []),
+    ...redirects.map((p) => ({
+      id: p.id === "cryptomus" ? "crypto" : p.id,
+      icon: (p.id === "cryptomus" ? "zap" : "wallet") as TopUpChoice["icon"],
+      title: p.id === "cryptomus" ? t("topup.cryptoTitle") : (p.label ?? t("topup.method")),
+      subtitle: p.label ?? (p.id === "cryptomus" ? t("topup.cryptoSub") : p.id),
+      description: p.description ?? (p.id === "cryptomus" ? t("topup.cryptoDesc") : ""),
+      badge: t("topup.cryptoBadge"),
+      badgeTone: "primary" as const,
+      panel: <TopUpForm options={p} balance={profile.balance} />,
+    })),
+  ];
+  // Re-arrange so the order follows the admin's sort order (manual is first by default).
+  const order = options.providers.map((p) => (p.flow === "manual" ? "manual" : p.id === "cryptomus" ? "crypto" : p.id));
+  choices.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
 
   return (
     <>
       <Card>
         <PageHeader
           title={t("nav.addFunds")}
-          description={manual ? t("topup.introManual") : t("topup.intro")}
+          description={manual && choices.length === 1 ? t("topup.introManual") : t("topup.intro")}
           actions={
             <span className="flex flex-wrap items-center gap-2">
               <span className="rounded-lg border border-line bg-surface-muted px-3 py-1.5 text-sm text-fg-muted">
@@ -48,68 +129,27 @@ export default async function TopUpPage() {
                 <Money amount={profile.balance} currency={profile.currency} variant="both" />
               </b>
               </span>
-              {manual && <ManualPaymentHelp details={manual} email={profile.email} />}
+              {manual && <ManualPaymentHelp details={manual} email={profile.email} autoOpen={choices.length === 1} />}
             </span>
           }
         />
-        {!options.available ? (
+        {choices.length === 0 ? (
           <EmptyState
             icon="wallet"
             title={t("topup.unavailable")}
             description={t("topup.unavailableHint")}
             action={<ButtonLink href="/price" variant="outline">{t("topup.browseNumbers")}</ButtonLink>}
           />
-        ) : manual ? (
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
-            <section aria-labelledby="manual-payment" className="space-y-4">
-              <div>
-                <h2 id="manual-payment" className="text-[15px] font-semibold">
-                  {t("topup.step1")}
-                </h2>
-                <p className="mt-1 text-sm text-fg-muted">{t("topup.step1Hint")}</p>
-              </div>
-              <PaymentAccount details={manual} />
-              <ul className="space-y-1.5 text-sm text-fg-muted">
-                <li className="flex gap-2">
-                  <Icon name="check" size={16} className="mt-0.5 shrink-0 text-primary" /> {t("topup.keepTid")}
-                </li>
-                <li className="flex gap-2">
-                  <Icon name="check" size={16} className="mt-0.5 shrink-0 text-primary" /> {t("topup.sameAmount")}
-                </li>
-                <li className="flex gap-2">
-                  <Icon name="check" size={16} className="mt-0.5 shrink-0 text-primary" /> {t("topup.addedAfter")}
-                </li>
-              </ul>
-              {wa && (
-                <div className="flex flex-wrap items-center gap-3 rounded-xl border border-line p-3">
-                  <span className="min-w-48 flex-1 text-sm">
-                    {t("topup.needHelp")}{" "}
-                    <b className="whitespace-nowrap" dir="ltr">
-                      {manual.whatsapp}
-                    </b>
-                  </span>
-                  <ButtonLink href={wa} target="_blank" rel="noopener noreferrer" size="sm" className="!bg-[#25d366] hover:!bg-[#1ebe5a]">
-                    <Icon name="message" size={16} /> {t("wa.contact")}
-                  </ButtonLink>
-                </div>
-              )}
-              {manual.note && <p className="text-sm text-fg-muted">{manual.note}</p>}
-            </section>
-            <section aria-labelledby="manual-request">
-              <h2 id="manual-request" className="mb-3 text-[15px] font-semibold">
-                {t("topup.step2")}
-              </h2>
-              <ManualTopUpForm options={options} balance={profile.balance} />
-            </section>
-          </div>
+        ) : choices.length === 1 ? (
+          choices[0].panel
         ) : (
-          <TopUpForm options={options} balance={profile.balance} />
+          <TopUpMethodChooser choices={choices} initial={initial} />
         )}
       </Card>
 
       {open.length > 0 && (
         <Card>
-          <PageHeader as="h2" title={manual ? t("topup.awaiting") : t("topup.unfinished")} />
+          <PageHeader as="h2" title={open.every((p) => p.manual) ? t("topup.awaiting") : t("topup.unfinished")} />
           <ul className="space-y-2">
             {open.map((p) => (
               <li key={p.id} className="rounded-xl border border-primary-tint-border p-3 sm:flex sm:items-center sm:gap-3">

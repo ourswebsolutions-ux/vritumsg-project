@@ -10,7 +10,7 @@ import { formatPrice } from "@/lib/format";
 import { MONEY_SCALE, parseAmount, toMinor, topUpFeeFor } from "@/lib/money";
 import { createTopUpAction } from "@/server/actions/payments";
 import type { TopUpResult } from "@/server/services/payment.service";
-import type { TopUpOptions } from "@/types/account";
+import type { TopUpProviderOption } from "@/types/account";
 import { useT } from "@/i18n/client";
 import { ConvertedAmount, Money } from "@/components/currency/DisplayCurrency";
 
@@ -32,11 +32,12 @@ function newKey(): string {
 const unitsLabel = (minor: number) => String(minor / MONEY_SCALE);
 
 /**
- * Add-funds form: amount (presets or custom), payment method and a live
- * summary. The preview mirrors the server's fee rule; the server recomputes
- * and validates everything when the payment is created.
+ * Add-funds form for one redirect provider (e.g. Cryptomus): amount (presets
+ * or custom), payment method and a live summary. The preview mirrors the
+ * server's fee rule; the server recomputes and validates everything when the
+ * payment is created, and only the provider's verified webhook credits.
  */
-export function TopUpForm({ options, balance }: { options: TopUpOptions; balance: number }) {
+export function TopUpForm({ options, balance }: { options: TopUpProviderOption; balance: number }) {
   const t = useT();
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -63,6 +64,7 @@ export function TopUpForm({ options, balance }: { options: TopUpOptions; balance
     return { fee, total: amount + fee };
   }, [amount, invalid, feeBps, options.feeFixed]);
   const hasFee = feeBps > 0 || options.feeFixed > 0;
+  const crypto = options.id === "cryptomus";
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -71,7 +73,7 @@ export function TopUpForm({ options, balance }: { options: TopUpOptions; balance
     startTransition(async () => {
       let r: TopUpResult;
       try {
-        r = await createTopUpAction({ amount: amountInput.trim(), method, idempotencyKey: key });
+        r = await createTopUpAction({ amount: amountInput.trim(), method, provider: options.id, idempotencyKey: key });
       } catch {
         // Unknown whether it was created: keep the key so a retry can't create a second payment.
         setError(t("topup.unreachableTry"));
@@ -93,6 +95,21 @@ export function TopUpForm({ options, balance }: { options: TopUpOptions; balance
         <Alert tone="warning" title={t("topup.testMode")}>
           {t("topup.testModeBody")}
         </Alert>
+      )}
+
+      {crypto && (
+        <div className="flex items-start gap-3 rounded-2xl border border-primary-tint-border bg-primary-tint/40 p-4">
+          <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary text-white">
+            <Icon name="shield" size={22} />
+          </span>
+          <span className="min-w-0">
+            <span className="block text-base font-semibold">{options.label ?? t("topup.cryptoPaySecure")}</span>
+            <span className="block text-[13px] text-fg-muted">{options.description ?? t("topup.cryptoCoins")}</span>
+            <span className="mt-1 inline-flex items-center gap-1 text-[12px] font-medium text-success">
+              <Icon name="lock" size={13} /> {t("topup.cryptoSecure")}
+            </span>
+          </span>
+        </div>
       )}
 
       <fieldset>
@@ -149,7 +166,8 @@ export function TopUpForm({ options, balance }: { options: TopUpOptions; balance
         <ConvertedAmount amount={invalid ? null : amount} currency={options.currency} className="mt-1" />
       </fieldset>
 
-      <fieldset>
+      {/* One provider method (Cryptomus): the coin and network are chosen on its page. */}
+      <fieldset className={cn(options.methods.length < 2 && "hidden")}>
         <legend className="mb-2.5 text-[15px] font-semibold">{t("topup.method")}</legend>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           {options.methods.map((m) => (
@@ -214,7 +232,7 @@ export function TopUpForm({ options, balance }: { options: TopUpOptions; balance
 
       <div className="flex flex-col-reverse items-stretch gap-3 sm:flex-row sm:items-center">
         <p className="flex-1 text-[13px] text-fg-muted">
-          {t("topup.gatewayNote")}
+          {crypto ? t("topup.cryptoNote") : t("topup.gatewayNote")}
         </p>
         <Button type="submit" size="lg" loading={pending} disabled={pending || Boolean(invalid) || !method}>
           {quote ? t("topup.continueWith", { price: formatPrice(quote.total, options.currency) }) : t("topup.continue")}

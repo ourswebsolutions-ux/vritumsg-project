@@ -11,6 +11,7 @@ const ITEMS: { href: string; label: string; icon: IconName }[] = [
   { href: "/admin/wallets", label: "Wallets", icon: "wallet" },
   { href: "/admin/topups", label: "Top-ups", icon: "plus" },
   { href: "/admin/payments", label: "Payments", icon: "lock" },
+  { href: "/admin/payment-events", label: "Payment webhooks", icon: "refresh" },
   { href: "/admin/orders", label: "Orders", icon: "phone" },
   { href: "/admin/transactions", label: "Transactions", icon: "history" },
   { href: "/admin/countries", label: "Countries", icon: "globe" },

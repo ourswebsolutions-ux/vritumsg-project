@@ -87,6 +87,26 @@ const schema = z.object({
   /** Gateway (redirect) providers only: how long a created payment stays payable. */
   PAYMENT_EXPIRY_MINUTES: z.coerce.number().int().min(5).max(7 * 24 * 60).default(60),
 
+  /**
+   * Cryptomus (crypto top-ups). Normally configured in Admin → Settings →
+   * Payments (stored encrypted); these are only the initial-deployment
+   * fallback and are ignored for any value set in the admin panel.
+   */
+  CRYPTOMUS_MERCHANT_ID: z.string().min(8).max(100).optional(),
+  CRYPTOMUS_PAYMENT_API_KEY: z.string().min(8).max(500).optional(),
+  CRYPTOMUS_PAYOUT_API_KEY: z.string().min(8).max(500).optional(),
+  /** Public webhook URL to give Cryptomus (default: APP_URL + /api/payments/webhook/cryptomus). */
+  CRYPTOMUS_WEBHOOK_URL: z.url().optional(),
+  /** Cryptomus API origin (override only for testing). */
+  CRYPTOMUS_API_URL: z.url().default("https://api.cryptomus.com"),
+  /**
+   * 32-byte key (base64 or 64 hex chars) that encrypts payment credentials
+   * saved in the admin panel (AES-256-GCM). Required to save credentials
+   * there; generate with: openssl rand -base64 32. Keep it secret and stable —
+   * changing it makes saved credentials unreadable (re-enter them).
+   */
+  SETTINGS_ENCRYPTION_KEY: z.string().min(32).max(200).optional(),
+
   /* Display-only currency conversion (never used for charging) */
   /**
    * Fixed display rates: units per 1 PLATFORM_CURRENCY unit, for the website

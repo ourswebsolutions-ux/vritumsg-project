@@ -487,6 +487,8 @@ enum PaymentStatus {
   REFUNDED
   /// Manual top-up refused by an administrator (never credited).
   REJECTED
+  /// Final: the customer paid less than required (crypto). Never credited automatically; staff review.
+  UNDERPAID
 }
 
 /// A wallet top-up. The wallet is credited only after the provider's own
@@ -551,12 +553,17 @@ model PaymentEvent {
   paymentId   String?   @map("payment_id") @db.Char(36)
   /// Set once the event was handled; unhandled events are processed again on redelivery.
   processedAt DateTime? @map("processed_at")
+  /// Outcome, e.g. "payment_paid", "unknown_payment", "retry", "error" (no payload, no secrets).
+  result      String?   @db.VarChar(32)
+  /// Safe reason when something needs attention.
+  error       String?   @db.VarChar(255)
   createdAt   DateTime  @default(now()) @map("created_at")
 
   payment Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
 
   @@unique([provider, eventId])
   @@index([paymentId])
+  @@index([provider, createdAt])
   @@map("payment_events")
 }
 

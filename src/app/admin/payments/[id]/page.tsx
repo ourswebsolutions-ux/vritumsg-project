@@ -13,11 +13,26 @@ import { Card } from "@/components/ui/Card";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { EmptyState } from "@/components/ui/States";
 import { formatDateTime, formatPrice, formatShortDateTime } from "@/lib/format";
-import { adminRecheckPaymentAction, adminResolveReviewAction } from "@/server/actions/admin";
+import { adminRecheckPaymentAction, adminResendWebhookAction, adminResolveReviewAction } from "@/server/actions/admin";
+import { ProviderBadge } from "@/components/admin/ProviderBadge";
 import { requireAdminPage } from "@/server/admin/guard";
 import { getAdminPayment } from "@/server/admin/orders";
 
 export const metadata: Metadata = { title: "Payment" };
+
+const PROVIDER_FIELD: Record<string, string> = {
+  providerStatus: "Provider status",
+  isFinal: "Final",
+  paymentAmount: "Amount paid (coin)",
+  payerAmount: "Expected amount (coin)",
+  payerCurrency: "Coin",
+  merchantAmount: "Merchant amount",
+  network: "Network",
+  txid: "TXID",
+  commission: "Cryptomus commission",
+  providerUpdatedAt: "Provider updated at",
+  checkedAt: "Last checked",
+};
 
 export default async function AdminPaymentPage({ params }: PageProps<"/admin/payments/[id]">) {
   const { id } = await params;
@@ -27,6 +42,7 @@ export default async function AdminPaymentPage({ params }: PageProps<"/admin/pay
   if (!data) notFound();
   const p = data.payment;
   const money = (v: number) => formatPrice(v, p.currency);
+  const crypto = p.provider === "cryptomus";
 
   return (
     <>
@@ -43,8 +59,9 @@ export default async function AdminPaymentPage({ params }: PageProps<"/admin/pay
           rows={[
             ["Payment ID", <span key="id" className="font-mono text-xs">{p.id}</span>],
             ["User", <Link key="u" href={`/admin/users/${p.user.id}`} className="text-primary hover:underline">{p.user.email}</Link>],
-            ["Provider · method", `${p.provider} · ${p.method}`],
-            ["Provider reference", <span key="r" className="font-mono text-xs">{p.providerPaymentId ?? "—"}</span>],
+            ["Provider · method", <ProviderBadge key="pv" provider={p.provider} method={p.method} />],
+            ["Order ID", <span key="o" className="font-mono text-xs">{p.reference}</span>],
+            [crypto ? "Cryptomus invoice UUID" : "Provider reference", <span key="r" className="font-mono text-xs break-all">{p.providerPaymentId ?? "—"}</span>],
             ["Amount credited", money(p.amount)],
             ["Fee", money(p.fee)],
             ["Total charged", money(p.total)],
@@ -53,14 +70,18 @@ export default async function AdminPaymentPage({ params }: PageProps<"/admin/pay
             ["Paid", p.paidAt ? formatDateTime(p.paidAt) : "—"],
             ["Expires", data.expiresAt ? formatDateTime(data.expiresAt) : "—"],
             ["Failure / note", p.failureReason ?? "—"],
+            ...(data.createError ? ([["Invoice creation error", data.createError]] as [string, string][]) : []),
             ...(data.review ? ([["Review closed", `${data.review.by} · ${formatDateTime(data.review.at)} — ${data.review.note}`]] as [string, string][]) : []),
           ]}
         />
         <div className="mt-5 flex flex-wrap items-start gap-3 border-t border-line pt-4">
           <ActionButton action={adminRecheckPaymentAction} fields={{ paymentId: p.id }} label="Re-check with provider" />
+          {crypto && p.providerPaymentId && ["paid", "underpaid"].includes(p.status) && (
+            <ActionButton action={adminResendWebhookAction} fields={{ paymentId: p.id }} label="Request webhook resend" />
+          )}
           <p className="max-w-md text-xs text-fg-muted">
             Reads the provider&apos;s current state. The wallet is credited only if the provider confirms payment with a matching amount and
-            currency — never from this page directly.
+            currency — never from this page directly. A resent webhook is verified and de-duplicated, so it can&apos;t credit twice.
           </p>
         </div>
         {p.needsReview && (
@@ -70,6 +91,13 @@ export default async function AdminPaymentPage({ params }: PageProps<"/admin/pay
           </div>
         )}
       </Card>
+
+      {data.providerDetails.length > 0 && (
+        <Card>
+          <PageHeader as="h2" title={crypto ? "Cryptomus details" : "Provider details"} description="As last reported by the provider when the payment was checked." />
+          <KeyValues rows={data.providerDetails.map(([k, v]) => [PROVIDER_FIELD[k] ?? k, <span key={k} className="font-mono text-xs break-all">{v}</span>])} />
+        </Card>
+      )}
 
       <Card>
         <PageHeader as="h2" title="Ledger" />
@@ -95,6 +123,7 @@ export default async function AdminPaymentPage({ params }: PageProps<"/admin/pay
             { header: "Event", className: "font-mono text-xs", cell: (e) => e.eventId },
             { header: "Type", cell: (e) => e.type },
             { header: "Processed", cell: (e) => (e.processedAt ? <Badge tone="success">Yes</Badge> : <Badge tone="warning">No</Badge>) },
+            { header: "Result", cell: (e) => <span className="text-xs">{e.result ?? "—"}{e.error ? <span className="block text-danger">{e.error}</span> : null}</span> },
             { header: "Received", className: "whitespace-nowrap text-fg-muted", cell: (e) => formatShortDateTime(e.createdAt) },
           ]}
         />

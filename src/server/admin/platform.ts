@@ -2,7 +2,7 @@ import "server-only";
 import { toDecimalString, toMinor } from "@/lib/money";
 import { db, type Prisma } from "@/server/db";
 import { env } from "@/server/env";
-import { getPaymentProvider } from "@/server/payments/registry";
+import { listPaymentProviders } from "@/server/payments/registry";
 import { getProvider } from "@/server/providers/registry";
 import { getCatalogStatus, syncCatalog } from "@/server/services/catalog.service";
 import { customerPrice } from "@/server/services/currency";
@@ -210,7 +210,7 @@ export async function getProvidersOverview(opts: { fresh?: boolean } = {}) {
     const fail = byAction.find((a) => a.action === action && !a.success);
     return { action, ok: ok?._count._all ?? 0, failed: fail?._count._all ?? 0, avgMs: Math.round(ok?._avg.durationMs ?? fail?._avg.durationMs ?? 0) };
   });
-  const payment = getPaymentProvider();
+  const paymentProviders = await listPaymentProviders();
   let apiHost = "—";
   try {
     apiHost = new URL(e.GRIZZLY_API_URL).host;
@@ -235,10 +235,10 @@ export async function getProvidersOverview(opts: { fresh?: boolean } = {}) {
       catalog: { ...catalog, countries: counts[0], services: counts[1], offersInStock: counts[2] },
     },
     payments: {
-      id: payment?.id ?? "none",
-      label: payment?.label ?? "Not configured",
-      live: payment?.live ?? false,
-      flow: payment?.flow ?? null,
+      id: paymentProviders.map((p) => p.id).join(", ") || "none",
+      label: paymentProviders.map((p) => p.label).join(" + ") || "Not configured",
+      live: paymentProviders.every((p) => p.live),
+      flow: paymentProviders.some((p) => p.flow === "manual") ? ("manual" as const) : (paymentProviders[0]?.flow ?? null),
       adminNotifyEmail: e.ADMIN_NOTIFY_EMAIL ? maskAddress(e.ADMIN_NOTIFY_EMAIL) : null,
     },
     email: {

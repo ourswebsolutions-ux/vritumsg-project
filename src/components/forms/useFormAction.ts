@@ -5,7 +5,7 @@ import { initialFormState, type FormState } from "@/types/forms";
 
 type ServerAction = (prev: FormState, data: FormData) => Promise<FormState>;
 
-const SECRET_FIELDS = /password|confirm|current|next$|token/i;
+const SECRET_FIELDS = /password|confirm|current|next$|token|merchantId|paymentKey|payoutKey/i;
 
 /**
  * useActionState plus the behaviour every auth form needs:

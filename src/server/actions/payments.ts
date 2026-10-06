@@ -15,6 +15,8 @@ const FAILED: TopUpResult = { ok: false, code: "PROVIDER_ERROR", message: "Somet
 const createSchema = z.object({
   amount: z.string().max(20),
   method: z.string().regex(/^[a-z0-9_]{1,32}$/),
+  /** Which provider offers the method ("cryptomus", …); optional when only one does. */
+  provider: z.string().regex(/^[a-z0-9_]{1,32}$/).optional(),
   /** Generated once per attempt so a double submit can't start two payments. */
   idempotencyKey: z.string().regex(/^[A-Za-z0-9_-]{16,64}$/),
 });

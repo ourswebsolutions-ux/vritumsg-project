@@ -133,7 +133,7 @@ export type OrderStats = {
   byService: { name: string; color: string; logo: string | null; total: number; completed: number; spent: number }[];
 };
 
-export type PaymentStatus = "pending" | "processing" | "paid" | "failed" | "cancelled" | "expired" | "refunded" | "rejected";
+export type PaymentStatus = "pending" | "processing" | "paid" | "failed" | "cancelled" | "expired" | "refunded" | "rejected" | "underpaid";
 
 /** A wallet top-up as shown to its owner. Amounts are integer minor units. */
 export type PaymentListItem = {
@@ -148,6 +148,8 @@ export type PaymentListItem = {
   currency: string;
   method: string;
   methodLabel: string;
+  /** "manual", "cryptomus", … */
+  provider: string;
   status: PaymentStatus;
   createdAt: string;
   paidAt: string | null;
@@ -178,9 +180,28 @@ export type ManualPaymentDetails = {
 
 export type TopUpMethod = { id: string; label: string; description?: string; kind: string };
 
+/** One payment provider offered on the add-funds page (limits/fees are its own). */
+export type TopUpProviderOption = {
+  id: string;
+  flow: "redirect" | "manual";
+  /** Admin-set display name (Cryptomus), or null for the built-in wording. */
+  label: string | null;
+  description: string | null;
+  test: boolean;
+  currency: string;
+  min: number;
+  max: number;
+  feePercent: string;
+  feeFixed: number;
+  presets: number[];
+  methods: TopUpMethod[];
+};
+
 /** What the add-funds form may offer; all limits are enforced again on the server. */
 export type TopUpOptions = {
   available: boolean;
+  /** Every provider a customer can use now, in admin order. */
+  providers: TopUpProviderOption[];
   /** "manual": send money yourself, then submit a request an admin approves. */
   flow: "redirect" | "manual";
   manual: ManualPaymentDetails | null;

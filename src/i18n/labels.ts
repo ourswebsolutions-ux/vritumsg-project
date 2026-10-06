@@ -26,6 +26,7 @@ export const PAYMENT_STATUS: Record<PaymentStatus, { label: MessageKey; tone: To
   expired: { label: "pay.status.expired", tone: "neutral" },
   refunded: { label: "pay.status.refunded", tone: "warning" },
   rejected: { label: "pay.status.rejected", tone: "danger" },
+  underpaid: { label: "pay.status.underpaid", tone: "warning" },
 };
 
 /** Manual (admin-verified) top-ups read differently. */

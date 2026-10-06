@@ -17,12 +17,23 @@ export type PaymentMethodInfo = {
 /** The provider's view of one payment, normalized. */
 export type ProviderPaymentState = {
   providerPaymentId: string;
-  status: "pending" | "processing" | "paid" | "failed" | "cancelled" | "expired" | "refunded";
+  /**
+   * "underpaid": final, the customer paid less than the invoice — never
+   * credited automatically (flagged for staff).
+   */
+  status: "pending" | "processing" | "paid" | "underpaid" | "failed" | "cancelled" | "expired" | "refunded";
   /** Amount the provider collected/expects, integer minor units (1/10,000). */
   amount: number;
   currency: string;
   /** Our payment reference as echoed by the provider, when it keeps one. */
   reference: string | null;
+  /** Paid, but more than the invoice (credited the invoice amount; staff can review the difference). */
+  overpaid?: boolean;
+  /**
+   * Non-secret provider details kept for support (status, network, transaction
+   * hash, paid amount…). Never credentials or personal payment data.
+   */
+  details?: Record<string, string | boolean | null>;
 };
 
 export type CreatePaymentRequest = {
