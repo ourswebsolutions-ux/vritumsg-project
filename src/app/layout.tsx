@@ -81,7 +81,7 @@ export default async function RootLayout({
       suppressHydrationWarning
     >
       <head>
-          <meta name="cryptomus" content="4ee61891" />
+          <meta name="cryptomus" content="8bb50b94" />
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>
       <body className="flex min-h-dvh flex-col">
